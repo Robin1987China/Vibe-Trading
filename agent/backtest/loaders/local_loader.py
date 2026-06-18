@@ -231,13 +231,6 @@ class DataLoader:
             logger.warning("local loader: unsupported type %r for symbol %s", src_type, symbol)
             return None
 
-        path = entry.get("path", "").strip()
-        if not path:
-            logger.warning("local loader: missing path for symbol %s", symbol)
-            return None
-
-        expanded = str(Path(path).expanduser())
-
         col_map: dict[str, str] = dict(_DEFAULT_COLUMNS)
         user_cols = entry.get("columns")
         if isinstance(user_cols, dict):
@@ -260,6 +253,11 @@ class DataLoader:
                 return None
             df = _read_duckdb(db_path, query, col_map, date_fmt)
         else:
+            path = entry.get("path", "").strip()
+            if not path:
+                logger.warning("local loader: missing path for symbol %s", symbol)
+                return None
+            expanded = str(Path(path).expanduser())
             df = reader(expanded, col_map, date_fmt)
 
         if df is None:
