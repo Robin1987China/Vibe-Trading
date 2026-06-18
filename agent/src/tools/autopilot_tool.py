@@ -1,14 +1,13 @@
-"""Research Autopilot Phase 1: goal-hypothesis bridge tool.
+"""Research Autopilot: goal-hypothesis bridge + backtest config generation.
 
-Connects the Hypothesis Registry to the Research Goal runtime so the agent
-can scaffold a full research workflow from a single ``run_research_autopilot``
-call instead of manually creating goals, recalling hypothesis IDs, and
-wiring criteria by hand.
+Phase 1: Connects the Hypothesis Registry to the Research Goal runtime.
+Phase 2: Auto-generates backtest config.json from hypothesis metadata.
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from src.agent.tools import BaseTool
@@ -142,6 +141,149 @@ class RunResearchAutopilotTool(BaseTool):
                     "goal": snapshot,
                     "hypothesis": hypothesis_summary,
                     "next_step": "Continue the research workflow. Generate backtest code → execute → add_goal_evidence.",
+                }
+            )
+
+        except Exception as exc:
+            return _error(exc)
+
+
+_UNIVERSE_CODES: dict[str, list[str]] = {
+    "csi 300": ["000300.SH"],
+    "csi300": ["000300.SH"],
+    "csi 500": ["000905.SH"],
+    "csi500": ["000905.SH"],
+    "sse 50": ["000016.SH"],
+    "sse50": ["000016.SH"],
+    "szse comp": ["399001.SZ"],
+    "sse comp": ["000001.SH"],
+    "chiNext": ["399006.SZ"],
+    "s&p 500": ["SPY.US"],
+    "sp500": ["SPY.US"],
+    "nasdaq": ["QQQ.US"],
+    "dow jones": ["DIA.US"],
+    "hang seng": ["^HSI.HK"],
+    "nikkei": ["^N225.HK"],
+}
+
+
+def _lookup_codes(universe: str) -> list[str]:
+    key = universe.strip().lower().replace("-", " ").replace("_", " ")
+    return _UNIVERSE_CODES.get(key, [universe])
+
+
+class GenerateBacktestConfigTool(BaseTool):
+    """Generate backtest config.json from a research hypothesis.
+
+    Reads a hypothesis, derives config fields from its universe and
+    data_sources, and writes a ready-to-run config.json to a run directory.
+    The agent should then create signal_engine.py from the signal_definition
+    and call the backtest tool.
+    """
+
+    name = "generate_backtest_config"
+    description = (
+        "Generate a backtest config.json from a saved hypothesis. "
+        "Auto-populates codes from the hypothesis universe and source from "
+        "data_sources. Writes config.json to a run directory. You must still "
+        "create code/signal_engine.py from the signal_definition before calling "
+        "the backtest tool."
+    )
+    is_readonly = False
+    repeatable = True
+    parameters = {
+        "type": "object",
+        "properties": {
+            "hypothesis_id": {
+                "type": "string",
+                "description": "ID of a previously created research hypothesis",
+            },
+            "start_date": {
+                "type": "string",
+                "description": "Backtest start date (YYYY-MM-DD)",
+            },
+            "end_date": {
+                "type": "string",
+                "description": "Backtest end date (YYYY-MM-DD)",
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Current session id (host-injected)",
+            },
+        },
+        "required": ["hypothesis_id", "start_date", "end_date"],
+    }
+
+    def execute(self, **kwargs: Any) -> str:
+        try:
+            hypothesis_id = str(kwargs.get("hypothesis_id", "")).strip()
+            if not hypothesis_id:
+                return json.dumps(
+                    {"status": "error", "error": "hypothesis_id is required"},
+                    ensure_ascii=False,
+                )
+
+            registry = HypothesisRegistry()
+            hypothesis = registry.get(hypothesis_id)
+            if hypothesis is None:
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"Hypothesis not found: {hypothesis_id}",
+                        "hint": "Use search_hypotheses to list available hypotheses.",
+                    },
+                    ensure_ascii=False,
+                )
+
+            if not hypothesis.universe.strip():
+                return json.dumps(
+                    {
+                        "status": "error",
+                        "error": "Hypothesis has no universe set",
+                        "hint": "Use update_hypothesis to set a universe (e.g. 'CSI 300').",
+                    },
+                    ensure_ascii=False,
+                )
+
+            start_date = str(kwargs.get("start_date", "")).strip()
+            end_date = str(kwargs.get("end_date", "")).strip()
+
+            codes = _lookup_codes(hypothesis.universe)
+            source = (hypothesis.data_sources or ["auto"])[0]
+
+            config = {
+                "codes": codes,
+                "start_date": start_date,
+                "end_date": end_date,
+                "source": source,
+                "interval": "1D",
+            }
+
+            run_dir = Path.home() / ".vibe-trading" / "runs" / f"autopilot_{hypothesis_id[-8:]}"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "code").mkdir(parents=True, exist_ok=True)
+
+            config_path = run_dir / "config.json"
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+
+            return _ok(
+                {
+                    "run_dir": str(run_dir),
+                    "config": config,
+                    "config_path": str(config_path),
+                    "hypothesis": {
+                        "hypothesis_id": hypothesis.hypothesis_id,
+                        "title": hypothesis.title,
+                        "signal_definition": hypothesis.signal_definition,
+                        "universe": hypothesis.universe,
+                        "data_sources": hypothesis.data_sources,
+                    },
+                    "next_step": (
+                        "Config written. Next: use write_file to create "
+                        "code/signal_engine.py from the signal_definition above, "
+                        "then call backtest(run_dir=...)."
+                    ),
                 }
             )
 
